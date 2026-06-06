@@ -1,0 +1,223 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -Eeuo pipefail
+
+VERSION="1.1.0"
+CONFIG_FILE="$HOME/.config/proot-tool/default.conf"
+[[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
+DEFAULT_IMAGE="${DEFAULT_IMAGE:-ubuntu:24.04}"
+DEFAULT_NAME="${DEFAULT_NAME:-ubuntu}"
+BACKUP_DIR="${BACKUP_DIR:-$HOME/storage/downloads/proot-backups}"
+THEME="${THEME:-neon}"
+
+# ANSI palette
+RESET='\033[0m'; BOLD='\033[1m'; DIM='\033[2m'
+BLACK='\033[30m'; RED='\033[31m'; GREEN='\033[32m'; YELLOW='\033[33m'
+BLUE='\033[34m'; MAGENTA='\033[35m'; CYAN='\033[36m'; WHITE='\033[37m'
+BRIGHT_RED='\033[91m'; BRIGHT_GREEN='\033[92m'; BRIGHT_YELLOW='\033[93m'
+BRIGHT_BLUE='\033[94m'; BRIGHT_MAGENTA='\033[95m'; BRIGHT_CYAN='\033[96m'; BRIGHT_WHITE='\033[97m'
+BG_BLACK='\033[40m'; BG_BLUE='\033[44m'; BG_MAGENTA='\033[45m'; BG_CYAN='\033[46m'
+
+apply_theme(){
+  case "$THEME" in
+    ocean) PRIMARY="$BRIGHT_BLUE"; SECONDARY="$BRIGHT_CYAN"; ACCENT="$WHITE" ;;
+    purple) PRIMARY="$BRIGHT_MAGENTA"; SECONDARY="$CYAN"; ACCENT="$BRIGHT_WHITE" ;;
+    classic) PRIMARY="$GREEN"; SECONDARY="$CYAN"; ACCENT="$WHITE" ;;
+    neon|*) PRIMARY="$BRIGHT_GREEN"; SECONDARY="$BRIGHT_CYAN"; ACCENT="$BRIGHT_MAGENTA" ;;
+  esac
+}
+apply_theme
+
+trap 'printf "\n%b✖ Operation interrupted.%b\n" "$BRIGHT_RED" "$RESET"' INT
+
+line(){ printf "%b%s%b\n" "$PRIMARY" "────────────────────────────────────────────────────────" "$RESET"; }
+header(){
+  clear 2>/dev/null || true
+  printf "%b%b" "$BOLD" "$PRIMARY"
+  cat <<'ART'
+╔══════════════════════════════════════════════════════╗
+║                    MRAPRGUILD                        ║
+║             TERMUX PROOT-DISTRO TOOL                 ║
+╚══════════════════════════════════════════════════════╝
+ART
+  printf "%b" "$RESET"
+  printf "%b◆ Rootless Linux Manager%b  %b•%b  %bv%s%b\n" "$SECONDARY" "$RESET" "$ACCENT" "$RESET" "$BRIGHT_WHITE" "$VERSION" "$RESET"
+  printf "%bTheme:%b %s  %bDefault:%b %s\n" "$DIM" "$RESET" "$THEME" "$DIM" "$RESET" "$DEFAULT_NAME"
+  line
+}
+section(){ printf "\n%b%b┌─ %s%b\n" "$BOLD" "$SECONDARY" "$*" "$RESET"; }
+info(){ printf "%b● INFO%b  %s\n" "$BRIGHT_BLUE" "$RESET" "$*"; }
+ok(){ printf "%b✔ DONE%b  %s\n" "$BRIGHT_GREEN" "$RESET" "$*"; }
+warn(){ printf "%b▲ WARN%b  %s\n" "$BRIGHT_YELLOW" "$RESET" "$*"; }
+err(){ printf "%b✖ ERROR%b %s\n" "$BRIGHT_RED" "$RESET" "$*" >&2; }
+prompt(){ printf "%b➜%b %s" "$PRIMARY" "$RESET" "$*"; }
+pause(){ printf "\n%bPress Enter to return to the dashboard...%b" "$DIM" "$RESET"; read -r _; }
+require_pd(){ command -v proot-distro >/dev/null 2>&1 || { err "proot-distro is not installed. Run: pkg install proot-distro"; exit 1; }; }
+valid_name(){ [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; }
+installed_names(){ proot-distro list -q 2>/dev/null || true; }
+exists(){ installed_names | grep -Fxq -- "$1"; }
+
+menu_item(){
+  local number="$1" icon="$2" label="$3" color="$4"
+  printf "  %b%b[%2s]%b  %b%-2s%b  %s\n" "$BOLD" "$color" "$number" "$RESET" "$color" "$icon" "$RESET" "$label"
+}
+
+install_container(){
+  local image name
+  section "INSTALL LINUX CONTAINER"
+  prompt "Image [$DEFAULT_IMAGE]: "; read -r image; image="${image:-$DEFAULT_IMAGE}"
+  prompt "Local name [$DEFAULT_NAME]: "; read -r name; name="${name:-$DEFAULT_NAME}"
+  valid_name "$name" || { err "Invalid name. Use letters, numbers, dot, underscore, or hyphen."; return; }
+  exists "$name" && { err "Container '$name' already exists."; return; }
+  info "Installing $image as $name..."
+  proot-distro install "$image" --name "$name"
+  ok "Installed successfully. Login with: proot-tool login $name"
+}
+
+login_container(){
+  local name; section "LOGIN TO CONTAINER"; prompt "Container name: "; read -r name
+  exists "$name" || { err "Container '$name' is not installed."; return; }
+  printf "%bEntering %s... Type 'exit' to return.%b\n" "$SECONDARY" "$name" "$RESET"
+  proot-distro login "$name"
+}
+
+run_command(){
+  local name cmd; section "RUN ONE COMMAND"; prompt "Container name: "; read -r name
+  exists "$name" || { err "Container '$name' is not installed."; return; }
+  prompt "Command: "; read -r cmd
+  [[ -n "$cmd" ]] || { warn "No command entered."; return; }
+  line
+  proot-distro login "$name" -- /bin/sh -lc "$cmd"
+  line
+  ok "Command finished."
+}
+
+list_containers(){ section "INSTALLED CONTAINERS"; proot-distro list; }
+
+backup_container(){
+  local name file
+  section "BACKUP CONTAINER"; prompt "Container name: "; read -r name
+  exists "$name" || { err "Container '$name' is not installed."; return; }
+  mkdir -p "$BACKUP_DIR"
+  file="$BACKUP_DIR/${name}-$(date +%Y%m%d-%H%M%S).tar.xz"
+  info "Creating backup: $file"
+  proot-distro backup "$name" --output "$file"
+  ok "Backup saved: $file"
+}
+
+restore_container(){
+  local file; section "RESTORE CONTAINER"; prompt "Backup file path: "; read -r file
+  file="${file/#\~/$HOME}"
+  [[ -f "$file" ]] || { err "File not found: $file"; return; }
+  info "Restoring from $file..."
+  proot-distro restore "$file"
+  ok "Restore complete."
+}
+
+rename_container(){
+  local old new; section "RENAME CONTAINER"
+  prompt "Current name: "; read -r old; prompt "New name: "; read -r new
+  exists "$old" || { err "Container '$old' is not installed."; return; }
+  valid_name "$new" || { err "Invalid new name."; return; }
+  proot-distro rename "$old" "$new"
+  ok "Renamed '$old' to '$new'."
+}
+
+reset_container(){
+  local name confirm; section "RESET CONTAINER"
+  prompt "Container name: "; read -r name
+  exists "$name" || { err "Container '$name' is not installed."; return; }
+  warn "This action erases all data inside '$name'."
+  prompt "Type RESET to continue: "; read -r confirm
+  [[ "$confirm" == RESET ]] || { warn "Reset cancelled."; return; }
+  proot-distro reset "$name"
+  ok "Container reset complete."
+}
+
+remove_container(){
+  local name confirm; section "REMOVE CONTAINER"
+  prompt "Container name: "; read -r name
+  exists "$name" || { err "Container '$name' is not installed."; return; }
+  warn "This permanently deletes '$name'."
+  prompt "Type the container name to continue: "; read -r confirm
+  [[ "$confirm" == "$name" ]] || { warn "Removal cancelled."; return; }
+  proot-distro remove "$name"
+  ok "Container removed."
+}
+
+quick_setup(){
+  local name; name="${1:-$DEFAULT_NAME}"
+  exists "$name" || { err "Container '$name' is not installed."; return; }
+  section "DEVELOPMENT TOOLKIT"
+  info "Updating packages and installing common development tools..."
+  proot-distro login "$name" -- /bin/sh -lc 'if command -v apt >/dev/null; then apt update && DEBIAN_FRONTEND=noninteractive apt install -y git curl wget nano vim python3 python3-pip build-essential; elif command -v apk >/dev/null; then apk update && apk add git curl wget nano vim python3 py3-pip build-base; elif command -v pacman >/dev/null; then pacman -Syu --noconfirm git curl wget nano vim python python-pip base-devel; else echo "Unsupported package manager"; exit 1; fi'
+  ok "Development packages installed."
+}
+
+show_help(){ cat <<EOF2
+${BOLD}${PRIMARY}Mraprguild Termux Proot-Distro Tool${RESET} v${VERSION}
+
+${SECONDARY}Usage:${RESET} proot-tool [command]
+
+${SECONDARY}Commands:${RESET}
+  menu                       Open styled interactive dashboard
+  install [image] [name]     Install a Linux container
+  login <name>               Login to a container
+  list                       List installed containers
+  run <name> <command...>    Run a command inside a container
+  backup <name> [output]     Create a backup archive
+  restore <archive>          Restore a backup archive
+  remove <name>              Remove a container
+  version                    Show version
+
+${SECONDARY}Themes:${RESET} neon, ocean, purple, classic
+Set THEME in ~/.config/proot-tool/default.conf
+EOF2
+}
+
+cli(){
+  case "${1:-menu}" in
+    menu) main_menu ;;
+    install) require_pd; proot-distro install "${2:-$DEFAULT_IMAGE}" --name "${3:-$DEFAULT_NAME}" ;;
+    login) require_pd; [[ -n "${2:-}" ]] || { show_help; exit 2; }; proot-distro login "$2" ;;
+    list) require_pd; proot-distro list ;;
+    run) require_pd; local n="${2:-}"; shift 2 || true; [[ -n "$n" && $# -gt 0 ]] || { show_help; exit 2; }; proot-distro login "$n" -- "$@" ;;
+    backup) require_pd; local n="${2:-}" out="${3:-}"; [[ -n "$n" ]] || { show_help; exit 2; }; [[ -n "$out" ]] && proot-distro backup "$n" --output "$out" || proot-distro backup "$n" ;;
+    restore) require_pd; [[ -n "${2:-}" ]] || { show_help; exit 2; }; proot-distro restore "$2" ;;
+    remove) require_pd; [[ -n "${2:-}" ]] || { show_help; exit 2; }; proot-distro remove "$2" ;;
+    version|-v|--version) printf "%bproot-tool %s%b\n" "$PRIMARY" "$VERSION" "$RESET" ;;
+    help|-h|--help) show_help ;;
+    *) err "Unknown command: $1"; show_help; exit 2 ;;
+  esac
+}
+
+main_menu(){
+  require_pd
+  while true; do
+    header
+    printf "%b%b  CONTAINER MANAGEMENT%b\n" "$BOLD" "$SECONDARY" "$RESET"
+    menu_item 1  "⬇" "Install Linux container" "$BRIGHT_GREEN"
+    menu_item 2  "➜" "Login to container" "$BRIGHT_CYAN"
+    menu_item 3  "▦" "List installed containers" "$BRIGHT_BLUE"
+    menu_item 4  "⌘" "Run one command" "$BRIGHT_MAGENTA"
+    menu_item 5  "⚙" "Install development tools" "$BRIGHT_YELLOW"
+    printf "\n%b%b  DATA & MAINTENANCE%b\n" "$BOLD" "$SECONDARY" "$RESET"
+    menu_item 6  "◉" "Backup container" "$BRIGHT_GREEN"
+    menu_item 7  "↻" "Restore container" "$BRIGHT_CYAN"
+    menu_item 8  "✎" "Rename container" "$BRIGHT_BLUE"
+    menu_item 9  "△" "Reset container" "$BRIGHT_YELLOW"
+    menu_item 10 "✖" "Remove container" "$BRIGHT_RED"
+    printf "\n"
+    menu_item 0  "◀" "Exit" "$BRIGHT_WHITE"
+    line
+    prompt "Select an option [0-10]: "; read -r choice
+    case "$choice" in
+      1) install_container; pause;; 2) login_container;; 3) list_containers; pause;;
+      4) run_command; pause;; 5) prompt "Container name [$DEFAULT_NAME]: "; read -r n; quick_setup "${n:-$DEFAULT_NAME}"; pause;;
+      6) backup_container; pause;; 7) restore_container; pause;; 8) rename_container; pause;;
+      9) reset_container; pause;; 10) remove_container; pause;; 0) printf "%bGoodbye from Mraprguild.%b\n" "$PRIMARY" "$RESET"; exit 0;;
+      *) warn "Invalid selection."; sleep 1;;
+    esac
+  done
+}
+
+cli "$@"
